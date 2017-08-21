@@ -3541,7 +3541,8 @@ declare module Immutable {
     toMap(): Map<K, V>;
 
     /**
-     * Converts this Collection to a Map, maintaining the order of iteration.
+     * Converts this Collection to an OrderedMap, maintaining the order of
+     * iteration.
      *
      * Note: This is equivalent to `OrderedMap(this.toKeyedSeq())`, but
      * provided for convenience and to allow for chained expressions.

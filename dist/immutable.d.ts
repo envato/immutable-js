@@ -1,3 +1,5 @@
+/** @ignore we should disable this rules, but let's activate it to enable eslint first */
+/* eslint-disable @typescript-eslint/no-explicit-any, @typescript-eslint/ban-types */
 /**
  * Immutable data encourages pure functions (data-in, data-out) and lends itself
  * to much simpler application development and enabling techniques from
@@ -91,6 +93,77 @@
  */
 
 declare namespace Immutable {
+  /** @ignore */
+  type OnlyObject<T> = Extract<T, object>;
+
+  /** @ignore */
+  type ContainObject<T> = OnlyObject<T> extends object
+    ? OnlyObject<T> extends never
+      ? false
+      : true
+    : false;
+
+  /**
+   * @ignore
+   *
+   * Used to convert deeply all immutable types to a plain TS type.
+   * Using `unknown` on object instead of recursive call as we have a circular reference issue
+   */
+  export type DeepCopy<T> = T extends Record<infer R>
+    ? // convert Record to DeepCopy plain JS object
+      {
+        [key in keyof R]: ContainObject<R[key]> extends true ? unknown : R[key];
+      }
+    : T extends MapOf<infer R>
+    ? // convert MapOf to DeepCopy plain JS object
+      {
+        [key in keyof R]: ContainObject<R[key]> extends true ? unknown : R[key];
+      }
+    : T extends Collection.Keyed<infer KeyedKey, infer V>
+    ? // convert KeyedCollection to DeepCopy plain JS object
+      {
+        [key in KeyedKey extends string | number | symbol
+          ? KeyedKey
+          : string]: V extends object ? unknown : V;
+      }
+    : // convert IndexedCollection or Immutable.Set to DeepCopy plain JS array
+    // eslint-disable-next-line @typescript-eslint/no-unused-vars
+    T extends Collection<infer _, infer V>
+    ? Array<DeepCopy<V>>
+    : T extends string | number // Iterable scalar types : should be kept as is
+    ? T
+    : T extends Iterable<infer V> // Iterable are converted to plain JS array
+    ? Array<DeepCopy<V>>
+    : T extends object // plain JS object are converted deeply
+    ? {
+        [ObjectKey in keyof T]: ContainObject<T[ObjectKey]> extends true
+          ? unknown
+          : T[ObjectKey];
+      }
+    : // other case : should be kept as is
+      T;
+
+  /**
+   * Describes which item in a pair should be placed first when sorting
+   *
+   * @ignore
+   */
+  export enum PairSorting {
+    LeftThenRight = -1,
+    RightThenLeft = +1,
+  }
+
+  /**
+   * Function comparing two items of the same type. It can return:
+   *
+   * * a PairSorting value, to indicate whether the left-hand item or the right-hand item should be placed before the other
+   *
+   * * the traditional numeric return value - especially -1, 0, or 1
+   *
+   * @ignore
+   */
+  export type Comparator<T> = (left: T, right: T) => PairSorting | number;
+
   /**
    * Lists are ordered indexed dense collections, much like a JavaScript
    * Array.
@@ -390,7 +463,10 @@ declare namespace Immutable {
      * @see `Map#update`
      */
     update(index: number, notSetValue: T, updater: (value: T) => T): this;
-    update(index: number, updater: (value: T | undefined) => T): this;
+    update(
+      index: number,
+      updater: (value: T | undefined) => T | undefined
+    ): this;
     update<R>(updater: (value: this) => R): R;
 
     /**
@@ -589,6 +665,19 @@ declare namespace Immutable {
     ): this;
 
     /**
+     * Returns a new List with the values for which the `predicate`
+     * function returns false and another for which is returns true.
+     */
+    partition<F extends T, C>(
+      predicate: (this: C, value: T, index: number, iter: this) => value is F,
+      context?: C
+    ): [List<T>, List<F>];
+    partition<C>(
+      predicate: (this: C, value: T, index: number, iter: this) => unknown,
+      context?: C
+    ): [this, this];
+
+    /**
      * Returns a List "zipped" with the provided collection.
      *
      * Like `zipWith`, but using the default `zipper`: creating an `Array`.
@@ -703,24 +792,6 @@ declare namespace Immutable {
      * ```
      */
     function isMap(maybeMap: unknown): maybeMap is Map<unknown, unknown>;
-
-    /**
-     * Creates a new Map from alternating keys and values
-     *
-     * <!-- runkit:activate -->
-     * ```js
-     * const { Map } = require('immutable')
-     * Map.of(
-     *   'key', 'value',
-     *   'numerical value', 3,
-     *    0, 'numerical key'
-     * )
-     * // Map { 0: "numerical key", "key": "value", "numerical value": 3 }
-     * ```
-     *
-     * @deprecated Use Map([ [ 'k', 'v' ] ]) or Map({ k: 'v' })
-     */
-    function of(...keyValues: Array<unknown>): Map<unknown, unknown>;
   }
 
   /**
@@ -760,8 +831,97 @@ declare namespace Immutable {
    * not altered.
    */
   function Map<K, V>(collection?: Iterable<[K, V]>): Map<K, V>;
+  function Map<R extends { [key in string | number | symbol]: unknown }>(
+    obj: R
+  ): MapOf<R>;
   function Map<V>(obj: { [key: string]: V }): Map<string, V>;
   function Map<K extends string | symbol, V>(obj: { [P in K]?: V }): Map<K, V>;
+
+  /**
+   * Represent a Map constructed by an object
+   *
+   * @ignore
+   */
+  interface MapOf<R extends { [key in string | number | symbol]: unknown }>
+    extends Map<keyof R, R[keyof R]> {
+    /**
+     * Returns the value associated with the provided key, or notSetValue if
+     * the Collection does not contain this key.
+     *
+     * Note: it is possible a key may be associated with an `undefined` value,
+     * so if `notSetValue` is not provided and this method returns `undefined`,
+     * that does not guarantee the key was not found.
+     */
+    get<K extends keyof R>(key: K, notSetValue?: unknown): R[K];
+    get<NSV>(key: any, notSetValue: NSV): NSV;
+
+    // TODO `<const P extends ...>` can be used after dropping support for TypeScript 4.x
+    // reference: https://www.typescriptlang.org/docs/handbook/release-notes/typescript-5-0.html#const-type-parameters
+    // after this change, `as const` assertions can be remove from the type tests
+    getIn<P extends ReadonlyArray<string | number | symbol>>(
+      searchKeyPath: [...P],
+      notSetValue?: unknown
+    ): RetrievePath<R, P>;
+
+    set<K extends keyof R>(key: K, value: R[K]): this;
+
+    update(updater: (value: this) => this): this;
+    update<K extends keyof R>(key: K, updater: (value: R[K]) => R[K]): this;
+    update<K extends keyof R, NSV extends R[K]>(
+      key: K,
+      notSetValue: NSV,
+      updater: (value: R[K]) => R[K]
+    ): this;
+
+    // Possible best type is MapOf<Omit<R, K>> but Omit seems to broke other function calls
+    // and generate recursion error with other methods (update, merge, etc.) until those functions are defined in MapOf
+    delete<K extends keyof R>(
+      key: K
+    ): Extract<R[K], undefined> extends never ? never : this;
+    remove<K extends keyof R>(
+      key: K
+    ): Extract<R[K], undefined> extends never ? never : this;
+
+    toJS(): { [K in keyof R]: DeepCopy<R[K]> };
+
+    toJSON(): { [K in keyof R]: R[K] };
+  }
+
+  // Loosely based off of this work.
+  // https://github.com/immutable-js/immutable-js/issues/1462#issuecomment-584123268
+
+  /** @ignore */
+  type GetMapType<S> = S extends MapOf<infer T> ? T : S;
+
+  /** @ignore */
+  type Head<T extends ReadonlyArray<any>> = T extends [
+    infer H,
+    ...Array<unknown>
+  ]
+    ? H
+    : never;
+
+  /** @ignore */
+  type Tail<T extends ReadonlyArray<any>> = T extends [unknown, ...infer I]
+    ? I
+    : Array<never>;
+
+  /** @ignore */
+  type RetrievePathReducer<
+    T,
+    C,
+    L extends ReadonlyArray<any>
+  > = C extends keyof GetMapType<T>
+    ? L extends []
+      ? GetMapType<T>[C]
+      : RetrievePathReducer<GetMapType<T>[C], Head<L>, Tail<L>>
+    : never;
+
+  /** @ignore */
+  type RetrievePath<
+    R,
+    P extends ReadonlyArray<string | number | symbol>
+  > = P extends [] ? P : RetrievePathReducer<R, Head<P>, Tail<P>>;
 
   interface Map<K, V> extends Collection.Keyed<K, V> {
     /**
@@ -954,7 +1114,7 @@ declare namespace Immutable {
      * Note: `update(key)` can be used in `withMutations`.
      */
     update(key: K, notSetValue: V, updater: (value: V) => V): this;
-    update(key: K, updater: (value: V | undefined) => V): this;
+    update(key: K, updater: (value: V | undefined) => V | undefined): this;
     update<R>(updater: (value: this) => R): R;
 
     /**
@@ -980,16 +1140,17 @@ declare namespace Immutable {
      */
     merge<KC, VC>(
       ...collections: Array<Iterable<[KC, VC]>>
-    ): Map<K | KC, V | VC>;
+    ): Map<K | KC, Exclude<V, VC> | VC>;
     merge<C>(
       ...collections: Array<{ [key: string]: C }>
-    ): Map<K | string, V | C>;
+    ): Map<K | string, Exclude<V, C> | C>;
+
     concat<KC, VC>(
       ...collections: Array<Iterable<[KC, VC]>>
-    ): Map<K | KC, V | VC>;
+    ): Map<K | KC, Exclude<V, VC> | VC>;
     concat<C>(
       ...collections: Array<{ [key: string]: C }>
-    ): Map<K | string, V | C>;
+    ): Map<K | string, Exclude<V, C> | C>;
 
     /**
      * Like `merge()`, `mergeWith()` returns a new Map resulting from merging
@@ -1009,10 +1170,14 @@ declare namespace Immutable {
      *
      * Note: `mergeWith` can be used in `withMutations`.
      */
-    mergeWith(
-      merger: (oldVal: V, newVal: V, key: K) => V,
-      ...collections: Array<Iterable<[K, V]> | { [key: string]: V }>
-    ): this;
+    mergeWith<KC, VC, VCC>(
+      merger: (oldVal: V, newVal: VC, key: K) => VCC,
+      ...collections: Array<Iterable<[KC, VC]>>
+    ): Map<K | KC, V | VC | VCC>;
+    mergeWith<C, CC>(
+      merger: (oldVal: V, newVal: C, key: string) => CC,
+      ...collections: Array<{ [key: string]: C }>
+    ): Map<K | string, V | C | CC>;
 
     /**
      * Like `merge()`, but when two compatible collections are encountered with
@@ -1043,9 +1208,12 @@ declare namespace Immutable {
      *
      * Note: `mergeDeep` can be used in `withMutations`.
      */
-    mergeDeep(
-      ...collections: Array<Iterable<[K, V]> | { [key: string]: V }>
-    ): this;
+    mergeDeep<KC, VC>(
+      ...collections: Array<Iterable<[KC, VC]>>
+    ): Map<K | KC, V | VC>;
+    mergeDeep<C>(
+      ...collections: Array<{ [key: string]: C }>
+    ): Map<K | string, V | C>;
 
     /**
      * Like `mergeDeep()`, but when two non-collections or incompatible
@@ -1407,9 +1575,81 @@ declare namespace Immutable {
     ): this;
 
     /**
+     * Returns a new Map with the values for which the `predicate`
+     * function returns false and another for which is returns true.
+     */
+    partition<F extends V, C>(
+      predicate: (this: C, value: V, key: K, iter: this) => value is F,
+      context?: C
+    ): [Map<K, V>, Map<K, F>];
+    partition<C>(
+      predicate: (this: C, value: V, key: K, iter: this) => unknown,
+      context?: C
+    ): [this, this];
+
+    /**
      * @see Collection.Keyed.flip
      */
     flip(): Map<V, K>;
+
+    /**
+     * Returns an OrderedMap of the same type which includes the same entries,
+     * stably sorted by using a `comparator`.
+     *
+     * If a `comparator` is not provided, a default comparator uses `<` and `>`.
+     *
+     * `comparator(valueA, valueB)`:
+     *
+     *   * Returns `0` if the elements should not be swapped.
+     *   * Returns `-1` (or any negative number) if `valueA` comes before `valueB`
+     *   * Returns `1` (or any positive number) if `valueA` comes after `valueB`
+     *   * Alternatively, can return a value of the `PairSorting` enum type
+     *   * Is pure, i.e. it must always return the same value for the same pair
+     *     of values.
+     *
+     * <!-- runkit:activate -->
+     * ```js
+     * const { Map } = require('immutable')
+     * Map({ "c": 3, "a": 1, "b": 2 }).sort((a, b) => {
+     *   if (a < b) { return -1; }
+     *   if (a > b) { return 1; }
+     *   if (a === b) { return 0; }
+     * });
+     * // OrderedMap { "a": 1, "b": 2, "c": 3 }
+     * ```
+     *
+     * Note: `sort()` Always returns a new instance, even if the original was
+     * already sorted.
+     *
+     * Note: This is always an eager operation.
+     */
+    sort(comparator?: Comparator<V>): this & OrderedMap<K, V>;
+
+    /**
+     * Like `sort`, but also accepts a `comparatorValueMapper` which allows for
+     * sorting by more sophisticated means:
+     *
+     * <!-- runkit:activate -->
+     * ```js
+     * const { Map } = require('immutable')
+     * const beattles = Map({
+     *   John: { name: "Lennon" },
+     *   Paul: { name: "McCartney" },
+     *   George: { name: "Harrison" },
+     *   Ringo: { name: "Starr" },
+     * });
+     * beattles.sortBy(member => member.name);
+     * ```
+     *
+     * Note: `sortBy()` Always returns a new instance, even if the original was
+     * already sorted.
+     *
+     * Note: This is always an eager operation.
+     */
+    sortBy<C>(
+      comparatorValueMapper: (value: V, key: K, iter: this) => C,
+      comparator?: (valueA: C, valueB: C) => number
+    ): this & OrderedMap<K, V>;
   }
 
   /**
@@ -1500,14 +1740,31 @@ declare namespace Immutable {
      */
     merge<KC, VC>(
       ...collections: Array<Iterable<[KC, VC]>>
-    ): OrderedMap<K | KC, V | VC>;
+    ): OrderedMap<K | KC, Exclude<V, VC> | VC>;
     merge<C>(
       ...collections: Array<{ [key: string]: C }>
-    ): OrderedMap<K | string, V | C>;
+    ): OrderedMap<K | string, Exclude<V, C> | C>;
+
     concat<KC, VC>(
       ...collections: Array<Iterable<[KC, VC]>>
-    ): OrderedMap<K | KC, V | VC>;
+    ): OrderedMap<K | KC, Exclude<V, VC> | VC>;
     concat<C>(
+      ...collections: Array<{ [key: string]: C }>
+    ): OrderedMap<K | string, Exclude<V, C> | C>;
+
+    mergeWith<KC, VC, VCC>(
+      merger: (oldVal: V, newVal: VC, key: K) => VCC,
+      ...collections: Array<Iterable<[KC, VC]>>
+    ): OrderedMap<K | KC, V | VC | VCC>;
+    mergeWith<C, CC>(
+      merger: (oldVal: V, newVal: C, key: string) => CC,
+      ...collections: Array<{ [key: string]: C }>
+    ): OrderedMap<K | string, V | C | CC>;
+
+    mergeDeep<KC, VC>(
+      ...collections: Array<Iterable<[KC, VC]>>
+    ): OrderedMap<K | KC, V | VC>;
+    mergeDeep<C>(
       ...collections: Array<{ [key: string]: C }>
     ): OrderedMap<K | string, V | C>;
 
@@ -1575,6 +1832,19 @@ declare namespace Immutable {
     ): this;
 
     /**
+     * Returns a new OrderedMap with the values for which the `predicate`
+     * function returns false and another for which is returns true.
+     */
+    partition<F extends V, C>(
+      predicate: (this: C, value: V, key: K, iter: this) => value is F,
+      context?: C
+    ): [OrderedMap<K, V>, OrderedMap<K, F>];
+    partition<C>(
+      predicate: (this: C, value: V, key: K, iter: this) => unknown,
+      context?: C
+    ): [this, this];
+
+    /**
      * @see Collection.Keyed.flip
      */
     flip(): OrderedMap<V, K>;
@@ -1606,6 +1876,7 @@ declare namespace Immutable {
      * `Set.fromKeys()` creates a new immutable Set containing the keys from
      * this Collection or JavaScript Object.
      */
+    function fromKeys<T>(iter: Collection.Keyed<T, unknown>): Set<T>;
     function fromKeys<T>(iter: Collection<T, unknown>): Set<T>;
     function fromKeys(obj: { [key: string]: unknown }): Set<string>;
 
@@ -1787,6 +2058,78 @@ declare namespace Immutable {
       predicate: (value: T, key: T, iter: this) => unknown,
       context?: unknown
     ): this;
+
+    /**
+     * Returns a new Set with the values for which the `predicate` function
+     * returns false and another for which is returns true.
+     */
+    partition<F extends T, C>(
+      predicate: (this: C, value: T, key: T, iter: this) => value is F,
+      context?: C
+    ): [Set<T>, Set<F>];
+    partition<C>(
+      predicate: (this: C, value: T, key: T, iter: this) => unknown,
+      context?: C
+    ): [this, this];
+
+    /**
+     * Returns an OrderedSet of the same type which includes the same entries,
+     * stably sorted by using a `comparator`.
+     *
+     * If a `comparator` is not provided, a default comparator uses `<` and `>`.
+     *
+     * `comparator(valueA, valueB)`:
+     *
+     *   * Returns `0` if the elements should not be swapped.
+     *   * Returns `-1` (or any negative number) if `valueA` comes before `valueB`
+     *   * Returns `1` (or any positive number) if `valueA` comes after `valueB`
+     *   * Alternatively, can return a value of the `PairSorting` enum type
+     *   * Is pure, i.e. it must always return the same value for the same pair
+     *     of values.
+     *
+     * <!-- runkit:activate -->
+     * ```js
+     * const { Set } = require('immutable')
+     * Set(['b', 'a', 'c']).sort((a, b) => {
+     *   if (a < b) { return -1; }
+     *   if (a > b) { return 1; }
+     *   if (a === b) { return 0; }
+     * });
+     * // OrderedSet { "a":, "b", "c" }
+     * ```
+     *
+     * Note: `sort()` Always returns a new instance, even if the original was
+     * already sorted.
+     *
+     * Note: This is always an eager operation.
+     */
+    sort(comparator?: Comparator<T>): this & OrderedSet<T>;
+
+    /**
+     * Like `sort`, but also accepts a `comparatorValueMapper` which allows for
+     * sorting by more sophisticated means:
+     *
+     * <!-- runkit:activate -->
+     * ```js
+     * const { Set } = require('immutable')
+     * const beattles = Set([
+     *   { name: "Lennon" },
+     *   { name: "McCartney" },
+     *   { name: "Harrison" },
+     *   { name: "Starr" },
+     * ]);
+     * beattles.sortBy(member => member.name);
+     * ```
+     *
+     * Note: `sortBy()` Always returns a new instance, even if the original was
+     * already sorted.
+     *
+     * Note: This is always an eager operation.
+     */
+    sortBy<C>(
+      comparatorValueMapper: (value: T, key: T, iter: this) => C,
+      comparator?: (valueA: C, valueB: C) => number
+    ): this & OrderedSet<T>;
   }
 
   /**
@@ -1803,7 +2146,9 @@ declare namespace Immutable {
     /**
      * True if the provided value is an OrderedSet.
      */
-    function isOrderedSet(maybeOrderedSet: unknown): boolean;
+    function isOrderedSet(
+      maybeOrderedSet: unknown
+    ): maybeOrderedSet is OrderedSet<unknown>;
 
     /**
      * Creates a new OrderedSet containing `values`.
@@ -1814,6 +2159,7 @@ declare namespace Immutable {
      * `OrderedSet.fromKeys()` creates a new immutable OrderedSet containing
      * the keys from this Collection or JavaScript Object.
      */
+    function fromKeys<T>(iter: Collection.Keyed<T, unknown>): OrderedSet<T>;
     function fromKeys<T>(iter: Collection<T, unknown>): OrderedSet<T>;
     function fromKeys(obj: { [key: string]: unknown }): OrderedSet<string>;
   }
@@ -1886,6 +2232,19 @@ declare namespace Immutable {
       predicate: (value: T, key: T, iter: this) => unknown,
       context?: unknown
     ): this;
+
+    /**
+     * Returns a new OrderedSet with the values for which the `predicate`
+     * function returns false and another for which is returns true.
+     */
+    partition<F extends T, C>(
+      predicate: (this: C, value: T, key: T, iter: this) => value is F,
+      context?: C
+    ): [OrderedSet<T>, OrderedSet<F>];
+    partition<C>(
+      predicate: (this: C, value: T, key: T, iter: this) => unknown,
+      context?: C
+    ): [this, this];
 
     /**
      * Returns an OrderedSet of the same type "zipped" with the provided
@@ -2223,8 +2582,8 @@ declare namespace Immutable {
    * ```
    */
   function Range(
-    start?: number,
-    end?: number,
+    start: number,
+    end: number,
     step?: number
   ): Seq.Indexed<number>;
 
@@ -2601,7 +2960,7 @@ declare namespace Immutable {
      * Note: This method may not be overridden. Objects with custom
      * serialization to plain JS may override toJSON() instead.
      */
-    toJS(): { [K in keyof TProps]: unknown };
+    toJS(): DeepCopy<TProps>;
 
     /**
      * Shallowly converts this Record to equivalent native JavaScript Object.
@@ -2761,14 +3120,14 @@ declare namespace Immutable {
        *
        * Converts keys to Strings.
        */
-      toJS(): { [key: string]: unknown };
+      toJS(): { [key in string | number | symbol]: DeepCopy<V> };
 
       /**
        * Shallowly converts this Keyed Seq to equivalent native JavaScript Object.
        *
        * Converts keys to Strings.
        */
-      toJSON(): { [key: string]: V };
+      toJSON(): { [key in string | number | symbol]: V };
 
       /**
        * Shallowly converts this collection to an Array.
@@ -2858,6 +3217,19 @@ declare namespace Immutable {
       ): this;
 
       /**
+       * Returns a new keyed Seq with the values for which the `predicate`
+       * function returns false and another for which is returns true.
+       */
+      partition<F extends V, C>(
+        predicate: (this: C, value: V, key: K, iter: this) => value is F,
+        context?: C
+      ): [Seq.Keyed<K, V>, Seq.Keyed<K, F>];
+      partition<C>(
+        predicate: (this: C, value: V, key: K, iter: this) => unknown,
+        context?: C
+      ): [this, this];
+
+      /**
        * @see Collection.Keyed.flip
        */
       flip(): Seq.Keyed<V, K>;
@@ -2890,7 +3262,7 @@ declare namespace Immutable {
       /**
        * Deeply converts this Indexed Seq to equivalent native JavaScript Array.
        */
-      toJS(): Array<unknown>;
+      toJS(): Array<DeepCopy<T>>;
 
       /**
        * Shallowly converts this Indexed Seq to equivalent native JavaScript Array.
@@ -2957,6 +3329,19 @@ declare namespace Immutable {
         predicate: (value: T, index: number, iter: this) => unknown,
         context?: unknown
       ): this;
+
+      /**
+       * Returns a new indexed Seq with the values for which the `predicate`
+       * function returns false and another for which is returns true.
+       */
+      partition<F extends T, C>(
+        predicate: (this: C, value: T, index: number, iter: this) => value is F,
+        context?: C
+      ): [Seq.Indexed<T>, Seq.Indexed<F>];
+      partition<C>(
+        predicate: (this: C, value: T, index: number, iter: this) => unknown,
+        context?: C
+      ): [this, this];
 
       /**
        * Returns a Seq "zipped" with the provided collections.
@@ -3052,7 +3437,7 @@ declare namespace Immutable {
       /**
        * Deeply converts this Set Seq to equivalent native JavaScript Array.
        */
-      toJS(): Array<unknown>;
+      toJS(): Array<DeepCopy<T>>;
 
       /**
        * Shallowly converts this Set Seq to equivalent native JavaScript Array.
@@ -3119,6 +3504,19 @@ declare namespace Immutable {
         predicate: (value: T, key: T, iter: this) => unknown,
         context?: unknown
       ): this;
+
+      /**
+       * Returns a new set Seq with the values for which the `predicate`
+       * function returns false and another for which is returns true.
+       */
+      partition<F extends T, C>(
+        predicate: (this: C, value: T, key: T, iter: this) => value is F,
+        context?: C
+      ): [Seq.Set<T>, Seq.Set<F>];
+      partition<C>(
+        predicate: (this: C, value: T, key: T, iter: this) => unknown,
+        context?: C
+      ): [this, this];
 
       [Symbol.iterator](): IterableIterator<T>;
     }
@@ -3264,6 +3662,19 @@ declare namespace Immutable {
       predicate: (value: V, key: K, iter: this) => unknown,
       context?: unknown
     ): this;
+
+    /**
+     * Returns a new Seq with the values for which the `predicate` function
+     * returns false and another for which is returns true.
+     */
+    partition<F extends V, C>(
+      predicate: (this: C, value: V, key: K, iter: this) => value is F,
+      context?: C
+    ): [Seq<K, V>, Seq<K, F>];
+    partition<C>(
+      predicate: (this: C, value: V, key: K, iter: this) => unknown,
+      context?: C
+    ): [this, this];
   }
 
   /**
@@ -3281,34 +3692,6 @@ declare namespace Immutable {
    * `Collection.Indexed`, or `Collection.Set`.
    */
   namespace Collection {
-    /**
-     * @deprecated use `const { isKeyed } = require('immutable')`
-     */
-    function isKeyed(
-      maybeKeyed: unknown
-    ): maybeKeyed is Collection.Keyed<unknown, unknown>;
-
-    /**
-     * @deprecated use `const { isIndexed } = require('immutable')`
-     */
-    function isIndexed(
-      maybeIndexed: unknown
-    ): maybeIndexed is Collection.Indexed<unknown>;
-
-    /**
-     * @deprecated use `const { isAssociative } = require('immutable')`
-     */
-    function isAssociative(
-      maybeAssociative: unknown
-    ): maybeAssociative is
-      | Collection.Keyed<unknown, unknown>
-      | Collection.Indexed<unknown>;
-
-    /**
-     * @deprecated use `const { isOrdered } = require('immutable')`
-     */
-    function isOrdered(maybeOrdered: unknown): boolean;
-
     /**
      * Keyed Collections have discrete keys tied to each value.
      *
@@ -3336,14 +3719,14 @@ declare namespace Immutable {
        *
        * Converts keys to Strings.
        */
-      toJS(): { [key: string]: unknown };
+      toJS(): { [key in string | number | symbol]: DeepCopy<V> };
 
       /**
        * Shallowly converts this Keyed collection to equivalent native JavaScript Object.
        *
        * Converts keys to Strings.
        */
-      toJSON(): { [key: string]: V };
+      toJSON(): { [key in string | number | symbol]: V };
 
       /**
        * Shallowly converts this collection to an Array.
@@ -3470,6 +3853,20 @@ declare namespace Immutable {
         context?: unknown
       ): this;
 
+      /**
+       * Returns a new keyed Collection with the values for which the
+       * `predicate` function returns false and another for which is returns
+       * true.
+       */
+      partition<F extends V, C>(
+        predicate: (this: C, value: V, key: K, iter: this) => value is F,
+        context?: C
+      ): [Collection.Keyed<K, V>, Collection.Keyed<K, F>];
+      partition<C>(
+        predicate: (this: C, value: V, key: K, iter: this) => unknown,
+        context?: C
+      ): [this, this];
+
       [Symbol.iterator](): IterableIterator<[K, V]>;
     }
 
@@ -3504,7 +3901,7 @@ declare namespace Immutable {
       /**
        * Deeply converts this Indexed collection to equivalent native JavaScript Array.
        */
-      toJS(): Array<unknown>;
+      toJS(): Array<DeepCopy<T>>;
 
       /**
        * Shallowly converts this Indexed collection to equivalent native JavaScript Array.
@@ -3767,6 +4164,20 @@ declare namespace Immutable {
         context?: unknown
       ): this;
 
+      /**
+       * Returns a new indexed Collection with the values for which the
+       * `predicate` function returns false and another for which is returns
+       * true.
+       */
+      partition<F extends T, C>(
+        predicate: (this: C, value: T, index: number, iter: this) => value is F,
+        context?: C
+      ): [Collection.Indexed<T>, Collection.Indexed<F>];
+      partition<C>(
+        predicate: (this: C, value: T, index: number, iter: this) => unknown,
+        context?: C
+      ): [this, this];
+
       [Symbol.iterator](): IterableIterator<T>;
     }
 
@@ -3801,7 +4212,7 @@ declare namespace Immutable {
       /**
        * Deeply converts this Set collection to equivalent native JavaScript Array.
        */
-      toJS(): Array<unknown>;
+      toJS(): Array<DeepCopy<T>>;
 
       /**
        * Shallowly converts this Set collection to equivalent native JavaScript Array.
@@ -3868,6 +4279,20 @@ declare namespace Immutable {
         predicate: (value: T, key: T, iter: this) => unknown,
         context?: unknown
       ): this;
+
+      /**
+       * Returns a new set Collection with the values for which the
+       * `predicate` function returns false and another for which is returns
+       * true.
+       */
+      partition<F extends T, C>(
+        predicate: (this: C, value: T, key: T, iter: this) => value is F,
+        context?: C
+      ): [Collection.Set<T>, Collection.Set<F>];
+      partition<C>(
+        predicate: (this: C, value: T, key: T, iter: this) => unknown,
+        context?: C
+      ): [this, this];
 
       [Symbol.iterator](): IterableIterator<T>;
     }
@@ -3975,7 +4400,8 @@ declare namespace Immutable {
      * In case the `Collection` is empty returns the optional default
      * value if provided, if no default value is provided returns undefined.
      */
-    first<NSV = undefined>(notSetValue?: NSV): V | NSV;
+    first<NSV>(notSetValue: NSV): V | NSV;
+    first(): V | undefined;
 
     /**
      * In case the `Collection` is not empty returns the last element of the
@@ -3983,7 +4409,8 @@ declare namespace Immutable {
      * In case the `Collection` is empty returns the optional default
      * value if provided, if no default value is provided returns undefined.
      */
-    last<NSV = undefined>(notSetValue?: NSV): V | NSV;
+    last<NSV>(notSetValue: NSV): V | NSV;
+    last(): V | undefined;
 
     // Reading deep values
 
@@ -4049,7 +4476,9 @@ declare namespace Immutable {
      * `Collection.Indexed`, and `Collection.Set` become `Array`, while
      * `Collection.Keyed` become `Object`, converting keys to Strings.
      */
-    toJS(): Array<unknown> | { [key: string]: unknown };
+    toJS():
+      | Array<DeepCopy<V>>
+      | { [key in string | number | symbol]: DeepCopy<V> };
 
     /**
      * Shallowly converts this Collection to equivalent native JavaScript Array or Object.
@@ -4057,7 +4486,7 @@ declare namespace Immutable {
      * `Collection.Indexed`, and `Collection.Set` become `Array`, while
      * `Collection.Keyed` become `Object`, converting keys to Strings.
      */
-    toJSON(): Array<V> | { [key: string]: V };
+    toJSON(): Array<V> | { [key in string | number | symbol]: V };
 
     /**
      * Shallowly converts this collection to an Array.
@@ -4300,6 +4729,19 @@ declare namespace Immutable {
     ): this;
 
     /**
+     * Returns a new Collection with the values for which the `predicate`
+     * function returns false and another for which is returns true.
+     */
+    partition<F extends V, C>(
+      predicate: (this: C, value: V, key: K, iter: this) => value is F,
+      context?: C
+    ): [Collection<K, V>, Collection<K, F>];
+    partition<C>(
+      predicate: (this: C, value: V, key: K, iter: this) => unknown,
+      context?: C
+    ): [this, this];
+
+    /**
      * Returns a new Collection of the same type in reverse order.
      */
     reverse(): this;
@@ -4315,6 +4757,7 @@ declare namespace Immutable {
      *   * Returns `0` if the elements should not be swapped.
      *   * Returns `-1` (or any negative number) if `valueA` comes before `valueB`
      *   * Returns `1` (or any positive number) if `valueA` comes after `valueB`
+     *   * Alternatively, can return a value of the `PairSorting` enum type
      *   * Is pure, i.e. it must always return the same value for the same pair
      *     of values.
      *
@@ -4337,7 +4780,7 @@ declare namespace Immutable {
      *
      * Note: This is always an eager operation.
      */
-    sort(comparator?: (valueA: V, valueB: V) => number): this;
+    sort(comparator?: Comparator<V>): this;
 
     /**
      * Like `sort`, but also accepts a `comparatorValueMapper` which allows for
@@ -4362,11 +4805,11 @@ declare namespace Immutable {
      */
     sortBy<C>(
       comparatorValueMapper: (value: V, key: K, iter: this) => C,
-      comparator?: (valueA: C, valueB: C) => number
+      comparator?: Comparator<C>
     ): this;
 
     /**
-     * Returns a `Collection.Keyed` of `Collection.Keyeds`, grouped by the return
+     * Returns a `Map` of `Collection`, grouped by the return
      * value of the `grouper` function.
      *
      * Note: This is always an eager operation.
@@ -4392,7 +4835,7 @@ declare namespace Immutable {
     groupBy<G>(
       grouper: (value: V, key: K, iter: this) => G,
       context?: unknown
-    ): /*Map*/ Seq.Keyed<G, /*this*/ Collection<K, V>>;
+    ): Map<G, this>;
 
     // Side effects
 
@@ -4559,7 +5002,6 @@ declare namespace Immutable {
      * returns Collection<K, V>
      */
     flatten(depth?: number): Collection<unknown, unknown>;
-    // tslint:disable-next-line unified-signatures
     flatten(shallow?: boolean): Collection<unknown, unknown>;
 
     /**
@@ -4761,7 +5203,7 @@ declare namespace Immutable {
      * If `comparator` returns 0 and either value is NaN, undefined, or null,
      * that value will be returned.
      */
-    max(comparator?: (valueA: V, valueB: V) => number): V | undefined;
+    max(comparator?: Comparator<V>): V | undefined;
 
     /**
      * Like `max`, but also accepts a `comparatorValueMapper` which allows for
@@ -4780,7 +5222,7 @@ declare namespace Immutable {
      */
     maxBy<C>(
       comparatorValueMapper: (value: V, key: K, iter: this) => C,
-      comparator?: (valueA: C, valueB: C) => number
+      comparator?: Comparator<C>
     ): V | undefined;
 
     /**
@@ -4798,7 +5240,7 @@ declare namespace Immutable {
      * If `comparator` returns 0 and either value is NaN, undefined, or null,
      * that value will be returned.
      */
-    min(comparator?: (valueA: V, valueB: V) => number): V | undefined;
+    min(comparator?: Comparator<V>): V | undefined;
 
     /**
      * Like `min`, but also accepts a `comparatorValueMapper` which allows for
@@ -4817,7 +5259,7 @@ declare namespace Immutable {
      */
     minBy<C>(
       comparatorValueMapper: (value: V, key: K, iter: this) => C,
-      comparator?: (valueA: C, valueB: C) => number
+      comparator?: Comparator<C>
     ): V | undefined;
 
     // Comparison
@@ -4950,6 +5392,10 @@ declare namespace Immutable {
    * [3]: https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Iteration_protocols#the_iterable_protocol
    *      "The iterable protocol"
    */
+  function fromJS<JSValue>(
+    jsValue: JSValue,
+    reviver?: undefined
+  ): FromJS<JSValue>;
   function fromJS(
     jsValue: unknown,
     reviver?: (
@@ -4958,6 +5404,29 @@ declare namespace Immutable {
       path?: Array<string | number>
     ) => unknown
   ): Collection<unknown, unknown>;
+
+  type FromJS<JSValue> = JSValue extends FromJSNoTransform
+    ? JSValue
+    : JSValue extends Array<any>
+    ? FromJSArray<JSValue>
+    : JSValue extends {}
+    ? FromJSObject<JSValue>
+    : any;
+
+  type FromJSNoTransform =
+    | Collection<any, any>
+    | number
+    | string
+    | null
+    | undefined;
+
+  type FromJSArray<JSValue> = JSValue extends Array<infer T>
+    ? List<FromJS<T>>
+    : never;
+
+  type FromJSObject<JSValue> = JSValue extends {}
+    ? Map<keyof JSValue, FromJS<JSValue[keyof JSValue]>>
+    : never;
 
   /**
    * Value equality check with semantics similar to `Object.is`, but treats
@@ -5336,7 +5805,7 @@ declare namespace Immutable {
   function update<K, V, C extends Collection<K, V>>(
     collection: C,
     key: K,
-    updater: (value: V | undefined) => V
+    updater: (value: V | undefined) => V | undefined
   ): C;
   function update<K, V, C extends Collection<K, V>, NSV>(
     collection: C,
@@ -5363,7 +5832,7 @@ declare namespace Immutable {
   function update<V>(
     collection: Array<V>,
     key: number,
-    updater: (value: V) => V
+    updater: (value: V | undefined) => V | undefined
   ): Array<V>;
   function update<V, NSV>(
     collection: Array<V>,
